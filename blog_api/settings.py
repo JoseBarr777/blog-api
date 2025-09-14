@@ -27,6 +27,11 @@ DEBUG = True
 
 ALLOWED_HOSTS = []
 
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "https://example.com",
+]
+
 # Application definition
 
 INSTALLED_APPS = [
@@ -40,10 +45,14 @@ INSTALLED_APPS = [
     'debug_toolbar',
     'django_filters',
     'markdownx',
+    'drf_spectacular',
+    'drf_spectacular_sidecar',
+    'corsheaders',
     'post',
 ]
 
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",
     'debug_toolbar.middleware.DebugToolbarMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -160,5 +169,18 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
     'anon': '100/hour',
     'user': '1000/day'
-    }
+    },
+    
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Blog API',
+    'DESCRIPTION': 'A simple blog API with posts and filtering',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    
+    'SWAGGER_UI_DIST': 'SIDECAR',
+    'SWAGGER_UI_FAVICON_HREF': 'SIDECAR',
+    'REDOC_DIST': 'SIDECAR',
 }
