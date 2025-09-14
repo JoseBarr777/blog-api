@@ -1,6 +1,7 @@
 from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
+from markdownx.models import MarkdownxField
 
 class PostStatus(models.TextChoices):
     DRAFT = 'draft', 'Draft'
@@ -11,7 +12,8 @@ class PostStatus(models.TextChoices):
 class Post(models.Model):
     title = models.CharField(max_length=250)
     slug = models.SlugField(max_length=250, unique=True)
-    body = models.TextField()
+    # body = models.TextField()
+    body = MarkdownxField()  # stores raw Markdown; editor handles preview/uploads
     author = models.ForeignKey(User, on_delete=models.CASCADE)
     status = models.CharField(
             max_length=20,

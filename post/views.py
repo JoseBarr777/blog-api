@@ -3,7 +3,7 @@ from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, IsoDateTimeFilter
 
 from .models import Post, PostStatus
-from .serializers import PostListSerializer
+from .serializers import PostListSerializer, PostDetailSerializer
 
 
 class PostFilter(FilterSet):
@@ -46,6 +46,24 @@ class PostListView(generics.ListAPIView):
 
     def get_queryset(self):
         # Published-only list; optimized for author data in the list serializer
+        return (
+            Post.objects.filter(status=PostStatus.PUBLISHED)
+            .select_related("author")
+        )
+
+class PostDetailView(generics.RetrieveAPIView):
+    """
+    Retrieve a single post by slug.
+    
+    Returns 404 for non-existent or unpublished posts.
+    Converts markdown body to sanitized HTML.
+    """
+    
+    serializer_class = PostDetailSerializer
+    lookup_field = 'slug'
+    
+    def get_queryset(self):
+        # Only published posts, with author data
         return (
             Post.objects.filter(status=PostStatus.PUBLISHED)
             .select_related("author")

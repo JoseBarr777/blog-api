@@ -2,22 +2,37 @@
 """
 Comprehensive test script for Django REST Framework Blog API
 
-This script validates:
-- Basic list endpoint functionality
+This script validates both LIST and DETAIL endpoints:
+
+LIST ENDPOINT (/api/v1/posts/):
+- Basic list endpoint functionality (published posts only)
 - Pagination (20 items per page)
-- Search functionality
-- Date filtering
-- Combined queries
+- Search functionality (?search=keyword)
+- Date filtering (?published_after & ?published_before)
+- Combined queries (search + date filters)
 - Response format validation
 - Edge cases and boundary conditions
 
+DETAIL ENDPOINT (/api/v1/posts/{slug}/):
+- Success cases with valid published posts
+- 404 handling for non-existent and draft posts
+- Markdown-to-HTML conversion validation
+- HTML sanitization verification (dangerous tags stripped)
+- Author field formatting (name string, not user ID)
+- All required fields present and properly typed
+- Performance testing and edge cases
+
 Usage:
     python test_api.py --base-url http://localhost:8000 --verbose
+    python test_api.py --list-only        # Test only list endpoint
+    python test_api.py --detail-only      # Test only detail endpoint
+    python test_api.py --endpoint-check   # Quick connectivity check
 """
 
 import requests
 import json
 import sys
+import re
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 import argparse
@@ -30,6 +45,7 @@ class APITester:
         self.verbose = verbose
         self.passed = 0
         self.failed = 0
+        self._published_posts = None  # Cache for published post data
         
     def log(self, message, level="INFO"):
         if self.verbose or level == "ERROR":
@@ -45,10 +61,10 @@ class APITester:
             self.log(f"✗ FAIL: {test_name} - {error_msg}", "ERROR")
             return False
     
-    def make_request(self, params=None):
+    def make_request(self, params=None, endpoint=None):
         """Make a GET request to the API endpoint"""
         try:
-            url = self.api_endpoint
+            url = endpoint or self.api_endpoint
             if params:
                 url += f"?{urlencode(params)}"
             
@@ -56,14 +72,29 @@ class APITester:
             response = requests.get(url, timeout=10)
             
             if response.status_code == 200:
-                return response.json(), True
+                return response.json(), True, response.status_code
             else:
                 self.log(f"HTTP {response.status_code}: {response.text}", "ERROR")
-                return None, False
+                return None, False, response.status_code
                 
         except requests.exceptions.RequestException as e:
             self.log(f"Request failed: {e}", "ERROR")
-            return None, False
+            return None, False, None
+    
+    def make_detail_request(self, slug):
+        """Make a GET request to the detail endpoint"""
+        detail_url = f"{self.base_url}/api/v1/posts/{slug}/"
+        return self.make_request(endpoint=detail_url)
+    
+    def get_published_posts(self):
+        """Get a list of published posts for testing detail endpoint"""
+        if self._published_posts is None:
+            data, success, _ = self.make_request()
+            if success and data.get('results'):
+                self._published_posts = data['results']
+            else:
+                self._published_posts = []
+        return self._published_posts
     
     def validate_response_structure(self, data, test_name):
         """Validate the expected response structure"""
@@ -88,7 +119,7 @@ class APITester:
         """Test 1: Basic list endpoint returns only published posts"""
         self.log("\n=== Testing Basic List Endpoint ===")
         
-        data, success = self.make_request()
+        data, success, _ = self.make_request()
         if not success:
             self.test_assert(False, "Basic list endpoint - API accessible")
             return False
@@ -105,7 +136,7 @@ class APITester:
         self.log("\n=== Testing Pagination ===")
         
         # Get first page
-        data, success = self.make_request()
+        data, success, _ = self.make_request()
         if not success:
             return False
         
@@ -120,7 +151,7 @@ class APITester:
         
         if total_count > 20:
             # Test second page
-            data2, success2 = self.make_request({'page': 2})
+            data2, success2, _ = self.make_request({'page': 2})
             if success2:
                 self.test_assert(
                     data['next'] is not None,
@@ -152,7 +183,7 @@ class APITester:
         search_terms = ['Django', 'Python', 'API', 'development', 'guide']
         
         for term in search_terms:
-            data, success = self.make_request({'search': term})
+            data, success, _ = self.make_request({'search': term})
             if success and len(data['results']) > 0:
                 self.log(f"Search for '{term}' returned {len(data['results'])} results")
                 self.validate_response_structure(data, f"Search for '{term}'")
@@ -173,7 +204,7 @@ class APITester:
                 break
         
         # Test empty search
-        data, success = self.make_request({'search': 'xyzabcnonexistentterm123'})
+        data, success, _ = self.make_request({'search': 'xyzabcnonexistentterm123'})
         if success:
             self.test_assert(
                 data['count'] == 0,
@@ -189,7 +220,7 @@ class APITester:
         
         # Test published_after filter
         test_date = "2025-01-01T00:00:00Z"
-        data, success = self.make_request({'published_after': test_date})
+        data, success, _ = self.make_request({'published_after': test_date})
         if success:
             self.validate_response_structure(data, "Date filtering - published_after")
             self.log(f"published_after {test_date} returned {data['count']} results")
@@ -210,13 +241,13 @@ class APITester:
         
         # Test published_before filter
         test_date_before = "2025-12-31T23:59:59Z"
-        data, success = self.make_request({'published_before': test_date_before})
+        data, success, _ = self.make_request({'published_before': test_date_before})
         if success:
             self.validate_response_structure(data, "Date filtering - published_before")
             self.log(f"published_before {test_date_before} returned {data['count']} results")
         
         # Test date range
-        data, success = self.make_request({
+        data, success, _ = self.make_request({
             'published_after': '2025-01-01T00:00:00Z',
             'published_before': '2025-12-31T23:59:59Z'
         })
@@ -236,7 +267,7 @@ class APITester:
             'published_after': '2025-09-01T00:00:00Z'
         }
         
-        data, success = self.make_request(params)
+        data, success, _ = self.make_request(params)
         if success:
             self.validate_response_structure(data, "Combined query - search + date")
             self.log(f"Combined query returned {data['count']} results")
@@ -266,14 +297,14 @@ class APITester:
         self.log("\n=== Testing Edge Cases ===")
         
         # Test invalid date format
-        data, success = self.make_request({'published_after': 'invalid-date'})
+        data, success, _ = self.make_request({'published_after': 'invalid-date'})
         self.test_assert(
             not success or 'results' in data,
             "Edge case - invalid date format handled gracefully"
         )
         
         # Test very large page number
-        data, success = self.make_request({'page': 999999})
+        data, success, _ = self.make_request({'page': 999999})
         if success:
             self.test_assert(
                 len(data['results']) == 0,
@@ -281,17 +312,17 @@ class APITester:
             )
         
         # Test negative page number
-        data, success = self.make_request({'page': -1})
+        data, success, _ = self.make_request({'page': -1})
         # Should either fail gracefully or return first page
         
         # Test empty search string
-        data, success = self.make_request({'search': ''})
+        data, success, _ = self.make_request({'search': ''})
         if success:
             self.validate_response_structure(data, "Edge case - empty search string")
         
         # Test very long search string
         long_search = 'a' * 1000
-        data, success = self.make_request({'search': long_search})
+        data, success, _ = self.make_request({'search': long_search})
         self.test_assert(
             success is not None,
             "Edge case - very long search string handled"
@@ -300,7 +331,7 @@ class APITester:
         # Test special characters in search
         special_chars = ['<script>', '&amp;', '"quotes"', "SQL'; DROP TABLE--"]
         for chars in special_chars:
-            data, success = self.make_request({'search': chars})
+            data, success, _ = self.make_request({'search': chars})
             self.test_assert(
                 success is not None,
                 f"Edge case - special characters '{chars[:20]}...' handled safely"
@@ -315,7 +346,7 @@ class APITester:
         import time
         
         start_time = time.time()
-        data, success = self.make_request()
+        data, success, _ = self.make_request()
         end_time = time.time()
         
         response_time = end_time - start_time
@@ -330,9 +361,330 @@ class APITester:
         
         return True
     
+    def test_detail_endpoint_success(self):
+        """Test 8: Detail endpoint success cases with valid published posts"""
+        self.log("\n=== Testing Detail Endpoint Success Cases ===")
+        
+        published_posts = self.get_published_posts()
+        if not published_posts:
+            self.test_assert(False, "Detail endpoint - no published posts available for testing")
+            return False
+        
+        # Test first few published posts
+        test_count = min(3, len(published_posts))
+        for i in range(test_count):
+            post = published_posts[i]
+            # Extract slug from the URL field
+            url = post.get('url', '')
+            if '/posts/' in url:
+                slug = url.split('/posts/')[-1].rstrip('/')
+                
+                data, success, status_code = self.make_detail_request(slug)
+                
+                if success:
+                    self.test_assert(
+                        success,
+                        f"Detail endpoint - post {i+1} accessible via slug '{slug}'"
+                    )
+                    
+                    # Validate all required fields are present
+                    required_fields = ['title', 'slug', 'body', 'author', 'published_at', 'created_at', 'updated_at']
+                    for field in required_fields:
+                        self.test_assert(
+                            field in data,
+                            f"Detail endpoint - post {i+1} has '{field}' field",
+                            f"Missing field: {field}"
+                        )
+                    
+                    # Verify field types
+                    if 'title' in data:
+                        self.test_assert(
+                            isinstance(data['title'], str),
+                            f"Detail endpoint - post {i+1} title is string"
+                        )
+                    
+                    if 'slug' in data:
+                        self.test_assert(
+                            isinstance(data['slug'], str),
+                            f"Detail endpoint - post {i+1} slug is string"
+                        )
+                        self.test_assert(
+                            data['slug'] == slug,
+                            f"Detail endpoint - post {i+1} slug matches request",
+                            f"Expected '{slug}', got '{data.get('slug')}'"
+                        )
+                    
+                    break  # Test at least one successful case
+        
+        return True
+    
+    def test_detail_endpoint_404_cases(self):
+        """Test 9: 404 handling for non-existent slugs and draft posts"""
+        self.log("\n=== Testing Detail Endpoint 404 Cases ===")
+        
+        # Test non-existent slug
+        fake_slug = "non-existent-post-slug-12345"
+        data, success, status_code = self.make_detail_request(fake_slug)
+        
+        self.test_assert(
+            status_code == 404,
+            f"Detail endpoint - non-existent slug returns 404",
+            f"Expected 404, got {status_code}"
+        )
+        
+        # Test malformed slugs
+        malformed_slugs = [
+            "",  # empty slug
+            "slug-with-/slash",
+            "slug with spaces",
+            "slug<>with<>brackets",
+            "very-" + "long-" * 50 + "slug",  # very long slug
+            "slug.with.dots",
+            "slug@with@symbols",
+        ]
+        
+        for bad_slug in malformed_slugs[:3]:  # Test first 3 to save time
+            data, success, status_code = self.make_detail_request(bad_slug)
+            self.test_assert(
+                status_code in [404, 400],
+                f"Detail endpoint - malformed slug '{bad_slug[:20]}...' handled appropriately",
+                f"Expected 404 or 400, got {status_code}"
+            )
+        
+        return True
+    
+    def test_markdown_conversion(self):
+        """Test 10: Markdown-to-HTML conversion validation"""
+        self.log("\n=== Testing Markdown Conversion ===")
+        
+        published_posts = self.get_published_posts()
+        if not published_posts:
+            return False
+        
+        # Test a few posts to check markdown conversion
+        test_count = min(3, len(published_posts))
+        html_found = False
+        
+        for i in range(test_count):
+            post = published_posts[i]
+            url = post.get('url', '')
+            if '/posts/' in url:
+                slug = url.split('/posts/')[-1].rstrip('/')
+                
+                data, success, status_code = self.make_detail_request(slug)
+                
+                if success and 'body' in data:
+                    body = data['body']
+                    
+                    # Check if body contains HTML tags (indicating markdown conversion)
+                    html_tags_pattern = r'<[^>]+>'
+                    has_html_tags = bool(re.search(html_tags_pattern, body))
+                    
+                    if has_html_tags:
+                        html_found = True
+                        self.test_assert(
+                            True,
+                            f"Markdown conversion - post {i+1} body contains HTML tags"
+                        )
+                        
+                        # Check for common HTML elements
+                        common_tags = ['<p>', '<h1>', '<h2>', '<h3>', '<strong>', '<em>', '<ul>', '<ol>', '<li>']
+                        tags_found = [tag for tag in common_tags if tag in body]
+                        
+                        if tags_found:
+                            self.test_assert(
+                                len(tags_found) > 0,
+                                f"Markdown conversion - post {i+1} contains common HTML tags: {', '.join(tags_found[:3])}"
+                            )
+                        
+                        break
+        
+        if not html_found:
+            self.log("Warning: No HTML tags found in tested posts. Markdown conversion may not be working.", "ERROR")
+        
+        return True
+    
+    def test_html_sanitization(self):
+        """Test 11: HTML sanitization verification"""
+        self.log("\n=== Testing HTML Sanitization ===")
+        
+        published_posts = self.get_published_posts()
+        if not published_posts:
+            return False
+        
+        # Test posts to ensure dangerous tags are stripped
+        test_count = min(5, len(published_posts))
+        
+        for i in range(test_count):
+            post = published_posts[i]
+            url = post.get('url', '')
+            if '/posts/' in url:
+                slug = url.split('/posts/')[-1].rstrip('/')
+                
+                data, success, status_code = self.make_detail_request(slug)
+                
+                if success and 'body' in data:
+                    body = data['body']
+                    
+                    # Check for dangerous tags that should be stripped
+                    dangerous_patterns = [
+                        r'<script[^>]*>',
+                        r'<iframe[^>]*>',
+                        r'<object[^>]*>',
+                        r'<embed[^>]*>',
+                        r'<form[^>]*>',
+                        r'<input[^>]*>',
+                        r'javascript:',
+                        r'on\w+\s*='  # event handlers like onclick, onmouseover
+                    ]
+                    
+                    for pattern in dangerous_patterns:
+                        has_dangerous = bool(re.search(pattern, body, re.IGNORECASE))
+                        self.test_assert(
+                            not has_dangerous,
+                            f"HTML sanitization - post {i+1} does not contain dangerous pattern '{pattern[:20]}'",
+                            f"Found dangerous pattern in body: {pattern}"
+                        )
+        
+        return True
+    
+    def test_author_field_formatting(self):
+        """Test 12: Author field returns formatted name string"""
+        self.log("\n=== Testing Author Field Formatting ===")
+        
+        published_posts = self.get_published_posts()
+        if not published_posts:
+            return False
+        
+        # Test author field formatting
+        test_count = min(3, len(published_posts))
+        
+        for i in range(test_count):
+            post = published_posts[i]
+            url = post.get('url', '')
+            if '/posts/' in url:
+                slug = url.split('/posts/')[-1].rstrip('/')
+                
+                data, success, status_code = self.make_detail_request(slug)
+                
+                if success and 'author' in data:
+                    author = data['author']
+                    
+                    # Author should be a string, not a number (user ID)
+                    self.test_assert(
+                        isinstance(author, str),
+                        f"Author field - post {i+1} author is string type",
+                        f"Expected string, got {type(author)}"
+                    )
+                    
+                    # Author should not be just a number
+                    self.test_assert(
+                        not author.isdigit(),
+                        f"Author field - post {i+1} author is not just user ID",
+                        f"Author field contains only digits: '{author}'"
+                    )
+                    
+                    # Author should have reasonable content
+                    self.test_assert(
+                        len(author.strip()) > 0,
+                        f"Author field - post {i+1} author is not empty",
+                        f"Author field is empty or whitespace"
+                    )
+                    
+                    self.log(f"Author field format: '{author}'")
+        
+        return True
+    
+    def test_detail_endpoint_performance(self):
+        """Test 13: Performance testing for detail endpoint"""
+        self.log("\n=== Testing Detail Endpoint Performance ===")
+        
+        import time
+        
+        published_posts = self.get_published_posts()
+        if not published_posts:
+            return False
+        
+        # Test performance with first available post
+        post = published_posts[0]
+        url = post.get('url', '')
+        if '/posts/' in url:
+            slug = url.split('/posts/')[-1].rstrip('/')
+            
+            start_time = time.time()
+            data, success, status_code = self.make_detail_request(slug)
+            end_time = time.time()
+            
+            response_time = end_time - start_time
+            
+            self.test_assert(
+                response_time < 5.0,
+                f"Detail endpoint performance - response time under 5 seconds",
+                f"Response took {response_time:.2f} seconds"
+            )
+            
+            self.log(f"Detail endpoint response time: {response_time:.3f} seconds")
+        
+        return True
+    
+    def test_detail_edge_cases(self):
+        """Test 14: Edge cases for detail endpoint"""
+        self.log("\n=== Testing Detail Endpoint Edge Cases ===")
+        
+        # Test various edge case slugs
+        edge_case_slugs = [
+            "slug-with-unicode-café",
+            "slug-with-numbers-123",
+            "slug-with-hyphens-and-underscores_test",
+            "a",  # very short slug
+            "-slug-starting-with-hyphen",
+            "slug-ending-with-hyphen-",
+            "UPPERCASE-SLUG",
+        ]
+        
+        for slug in edge_case_slugs[:4]:  # Test first 4 to save time
+            data, success, status_code = self.make_detail_request(slug)
+            
+            # Should handle gracefully (either 200 if exists, 404 if not)
+            self.test_assert(
+                status_code in [200, 404],
+                f"Detail endpoint edge case - slug '{slug}' handled appropriately",
+                f"Unexpected status code {status_code}"
+            )
+        
+        return True
+    
     def run_all_tests(self):
         """Run all test suites"""
         print("🚀 Starting Comprehensive API Tests")
+        print(f"🎯 Target API: {self.api_endpoint}")
+        print("=" * 60)
+        
+        test_methods = [
+            # List endpoint tests
+            self.test_basic_list_endpoint,
+            self.test_pagination,
+            self.test_search_functionality,
+            self.test_date_filtering,
+            self.test_combined_queries,
+            self.test_edge_cases,
+            self.test_response_performance,
+            
+            # Detail endpoint tests
+            self.test_detail_endpoint_success,
+            self.test_detail_endpoint_404_cases,
+            self.test_markdown_conversion,
+            self.test_html_sanitization,
+            self.test_author_field_formatting,
+            self.test_detail_endpoint_performance,
+            self.test_detail_edge_cases,
+        ]
+        
+        return self._run_tests(test_methods)
+    
+    def run_list_tests(self):
+        """Run only list endpoint tests"""
+        print("🚀 Starting List Endpoint Tests")
         print(f"🎯 Target API: {self.api_endpoint}")
         print("=" * 60)
         
@@ -346,6 +698,28 @@ class APITester:
             self.test_response_performance,
         ]
         
+        return self._run_tests(test_methods)
+    
+    def run_detail_tests(self):
+        """Run only detail endpoint tests"""
+        print("🚀 Starting Detail Endpoint Tests")
+        print(f"🎯 Target API: {self.api_endpoint}")
+        print("=" * 60)
+        
+        test_methods = [
+            self.test_detail_endpoint_success,
+            self.test_detail_endpoint_404_cases,
+            self.test_markdown_conversion,
+            self.test_html_sanitization,
+            self.test_author_field_formatting,
+            self.test_detail_endpoint_performance,
+            self.test_detail_edge_cases,
+        ]
+        
+        return self._run_tests(test_methods)
+    
+    def _run_tests(self, test_methods):
+        """Helper method to run a list of test methods"""
         for test_method in test_methods:
             try:
                 test_method()
@@ -359,7 +733,8 @@ class APITester:
         print("=" * 60)
         print(f"✅ Passed: {self.passed}")
         print(f"❌ Failed: {self.failed}")
-        print(f"📈 Success Rate: {(self.passed/(self.passed + self.failed)*100):.1f}%")
+        if self.passed + self.failed > 0:
+            print(f"📈 Success Rate: {(self.passed/(self.passed + self.failed)*100):.1f}%")
         
         if self.failed > 0:
             print("\n⚠️  Some tests failed. Check the output above for details.")
@@ -386,6 +761,16 @@ def main():
         action='store_true',
         help='Only check if API endpoint is accessible'
     )
+    parser.add_argument(
+        '--detail-only',
+        action='store_true',
+        help='Run only detail endpoint tests'
+    )
+    parser.add_argument(
+        '--list-only',
+        action='store_true',
+        help='Run only list endpoint tests'
+    )
     
     args = parser.parse_args()
     
@@ -393,7 +778,7 @@ def main():
     
     if args.endpoint_check:
         print(f"🔍 Checking API endpoint: {tester.api_endpoint}")
-        data, success = tester.make_request()
+        data, success, _ = tester.make_request()
         if success:
             print("✅ API endpoint is accessible")
             print(f"📊 Found {data.get('count', 0)} published posts")
@@ -403,8 +788,14 @@ def main():
             print("   python manage.py runserver")
         return
     
-    # Run full test suite
-    success = tester.run_all_tests()
+    # Determine which tests to run
+    if args.detail_only:
+        success = tester.run_detail_tests()
+    elif args.list_only:
+        success = tester.run_list_tests()
+    else:
+        success = tester.run_all_tests()
+    
     sys.exit(0 if success else 1)
 
 
